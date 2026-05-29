@@ -2,6 +2,7 @@ import asyncio
 import aiohttp
 import os
 import json
+import subprocess
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
@@ -11,7 +12,6 @@ TOKEN = "8785507686:AAEV7OaolE4SK1VvFfG6IoYGLSfm3vCgycs"
 AUDD_API = "e59e87c6c1d15c00d92e6652cafd3588"
 
 ADMIN_ID = 7362066938
-
 USERS_FILE = "users.json"
 
 bot = Bot(token=TOKEN)
@@ -40,7 +40,7 @@ def save_user(uid: int):
     with open(USERS_FILE, "w") as f:
         json.dump(list(users), f)
 
-# ================= ADMIN CHECK =================
+# ================= ADMIN =================
 def is_admin(uid: int):
     return uid == ADMIN_ID
 
@@ -69,14 +69,11 @@ async def start(message: types.Message):
 # ================= HELP =================
 @dp.message(F.text == "ℹ️ Помощь")
 async def help_cmd(message: types.Message):
-    await message.answer(
-        "🎧 Отправь видео до 10 секунд\n"
-        "и я попробую найти музыку"
-    )
+    await message.answer("🎧 отправь видео до 10 секунд")
 
-# ================= AUDIO API =================
+# ================= AUDD =================
 async def recognize(path):
-    url = "https://api.audd.io/recognize/"
+    url = "https://api.audd.io/"
 
     async with aiohttp.ClientSession() as session:
         with open(path, "rb") as f:
@@ -88,10 +85,6 @@ async def recognize(path):
                 return await r.json()
 
 # ================= VIDEO =================
-@dp.message(F.text == "🎥 Видео")
-async def video_hint(message: types.Message):
-    await message.answer("📹 отправь видео до 10 секунд")
-
 @dp.message(F.video)
 async def video_handler(message: types.Message):
     if message.video.duration > 10:
@@ -110,8 +103,35 @@ async def worker():
         message, path = await queue.get()
 
         try:
-            result = await recognize(path)
+            audio_path = path.replace(".mp4", ".mp3")
+
+            print("📹 VIDEO:", path)
+
+            # convert video → audio
+            process = subprocess.run([
+                "ffmpeg", "-y",
+                "-i", path,
+                audio_path
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            if process.returncode != 0:
+                print(process.stderr.decode())
+                await message.answer("❌ ошибка конвертации видео")
+                queue.task_done()
+                continue
+
+            if not os.path.exists(audio_path):
+                await message.answer("❌ mp3 не создан")
+                queue.task_done()
+                continue
+
+            print("🎵 AUDIO:", audio_path)
+
+            result = await recognize(audio_path)
+            print("🔎 AUDD:", result)
+
             os.remove(path)
+            os.remove(audio_path)
 
             if result.get("result"):
                 s = result["result"]
@@ -119,90 +139,18 @@ async def worker():
             else:
                 await message.answer("😕 не найдено")
 
-        except:
-            await message.answer("⚠️ ошибка")
+        except Exception as e:
+            await message.answer(f"⚠️ ошибка: {e}")
 
         queue.task_done()
 
-# ================= ADMIN PANEL =================
-@dp.message(F.text == "👑 Админка")
-async def admin_panel(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
-
-    kb = types.ReplyKeyboardMarkup(
-        keyboard=[
-            [types.KeyboardButton(text="📢 Рассылка")],
-            [types.KeyboardButton(text="✏️ Реклама")],
-            [types.KeyboardButton(text="🔙 Назад")]
-        ],
-        resize_keyboard=True
-    )
-
-    await message.answer("👑 админ панель", reply_markup=kb)
-
-# ================= BACK =================
-@dp.message(F.text == "🔙 Назад")
-async def back(message: types.Message):
-    await message.answer(
-        "↩️ меню",
-        reply_markup=menu(message.from_user.id)
-    )
-
-# ================= EDIT ADS =================
-@dp.message(F.text == "✏️ Реклама")
-async def edit_ads(message: types.Message):
-    global waiting_ads
-
-    if not is_admin(message.from_user.id):
-        return
-
-    waiting_ads = True
-    await message.answer("📝 отправь текст рекламы")
-
-# ================= SAVE ADS =================
-@dp.message()
-async def save_ads(message: types.Message):
-    global ads_text, waiting_ads
-
-    if not is_admin(message.from_user.id):
-        return
-
-    if not waiting_ads:
-        return
-
-    ads_text = message.text
-    waiting_ads = False
-
-    await message.answer("✅ реклама обновлена")
-
-# ================= BROADCAST =================
-@dp.message(F.text == "📢 Рассылка")
-async def broadcast(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
-
-    users = load_users()
-
-    await message.answer("📡 рассылка запущена...")
-
-    sent = 0
-
-    for u in users:
-        try:
-            await bot.send_message(u, ads_text)
-            sent += 1
-        except:
-            pass
-
-    await message.answer(f"📢 готово\nотправлено: {sent}")
-
-# ================= START BOT =================
+# ================= MAIN =================
 async def main():
+    await bot.delete_webhook(drop_pending_updates=True)
+
     print("BOT STARTED 🚀")
 
     asyncio.create_task(worker())
-
     await dp.start_polling(bot)
 
 asyncio.run(main())
